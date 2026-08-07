@@ -54,6 +54,7 @@ export class OneBotClient {
       this.ws.on("open", () => {
         console.log("[onebot] 已连接 NapCat:", this.wsUrl);
         this.reconnectCount = 0;
+        // ❌ 已移除协议标识发送，NapCat 不需要此握手
         resolve();
       });
       this.ws.on("message", (data) => this.handleMessage(data));
@@ -73,6 +74,7 @@ export class OneBotClient {
 
   onGroupMessage(fn: (e: GroupMessageEvent) => void): void {
     this.handlers.push(fn);
+    console.log(`[onebot] 已注册一个处理器，当前共 ${this.handlers.length} 个`);
   }
 
   async sendGroupMessage(
@@ -80,6 +82,7 @@ export class OneBotClient {
     message: MessageSegment[]
   ): Promise<void> {
     const url = `${this.httpUrl}/send_group_msg`;
+    console.log(`[onebot] 发送群消息到 ${groupId}:`, JSON.stringify(message));
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -92,6 +95,7 @@ export class OneBotClient {
     if (body.status !== "ok" || body.retcode !== 0) {
       throw new Error(`send_group_msg 失败: ${JSON.stringify(body)}`);
     }
+    console.log("[onebot] 消息发送成功");
   }
 
   async getMessage(messageId: number): Promise<GetMsgResponse["data"]> {
@@ -112,24 +116,32 @@ export class OneBotClient {
   }
 
   private async handleMessage(data: WebSocket.RawData): Promise<void> {
+    const raw = data.toString();
+    console.log("[onebot] 收到原始数据:", raw);
+
     try {
-      const event = JSON.parse(data.toString()) as OneBotEvent;
+      const event = JSON.parse(raw) as OneBotEvent;
+      console.log("[onebot] 解析后事件类型:", event.post_type, event.message_type, event.sub_type);
+
       if (
         event.post_type === "message" &&
         event.message_type === "group" &&
         event.sub_type === "normal"
       ) {
         const ge = event as GroupMessageEvent;
+        console.log(`[onebot] 匹配群消息，将分发给 ${this.handlers.length} 个处理器`);
         for (const fn of this.handlers) {
           try {
             await fn(ge);
-          } catch {
-            // log handler error but continue processing
+          } catch (err) {
+            console.error("[onebot] 处理器执行错误:", err);
           }
         }
+      } else {
+        console.log("[onebot] 事件不匹配群消息条件，忽略");
       }
-    } catch {
-      // ignore parse failures
+    } catch (err) {
+      console.error("[onebot] 解析消息失败:", err);
     }
   }
 
@@ -153,4 +165,4 @@ export class OneBotClient {
       });
     }, this.reconnectDelay);
   }
-}
+};
