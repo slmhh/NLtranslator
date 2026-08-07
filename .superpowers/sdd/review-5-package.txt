@@ -1,0 +1,28 @@
+﻿a88dc4e feat: add bot entry point
+---STAT---
+ bot/index.ts | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+---DIFF---
+diff --git a/bot/index.ts b/bot/index.ts
+new file mode 100644
+index 0000000..b877e70
+--- /dev/null
++++ b/bot/index.ts
+@@ -0,0 +1,17 @@
++import { loadConfig } from "./config.ts";
++import { OneBotClient } from "./onebot.ts";
++import { createHandler } from "./handler.ts";
++
++const config = loadConfig();
++const client = new OneBotClient(config);
++client.onGroupMessage(createHandler(client, config));
++
++client
++  .connect()
++  .then(() => {
++    console.log(`[bot] NLtranslator Bot 宸插惎鍔?(QQ: ${config.botQQ})`);
++  })
++  .catch((err) => {
++    console.error("[bot] 鍚姩澶辫触:", err.message);
++    process.exit(1);
++  });

@@ -1,0 +1,1988 @@
+﻿09c21e6 fix: add @types/node, @types/ws and fix env initialization
+8f3d75b chore: add bot/ to tsconfig include
+a88dc4e feat: add bot entry point
+ccf9500 feat: add message handler with translation logic
+e2c52dc feat: add OneBot v11 client with WS and HTTP API
+757f9b6 feat: add config module and .env.example
+f09cdf7 chore: add ws, tsx, and bot script
+2bdd221 chore: move superpowers docs to root-level superpowers/ directory
+4f1887f docs: add QQ bot design spec and implementation plan
+---STAT---
+ .env.example                                       |  13 +
+ bot/config.ts                                      |  78 +++
+ bot/handler.ts                                     | 156 +++++
+ bot/index.ts                                       |  17 +
+ bot/onebot.ts                                      | 146 +++++
+ package-lock.json                                  | 557 ++++++++++++++++
+ package.json                                       |   9 +-
+ superpowers/docs/plans/2026-08-06-nailong-qqbot.md | 716 +++++++++++++++++++++
+ .../docs/specs/2026-08-06-nailong-qqbot-design.md  | 143 ++++
+ tsconfig.json                                      |   2 +-
+ 10 files changed, 1835 insertions(+), 2 deletions(-)
+---DIFF---
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..6186cff
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,13 @@
++# NapCat WebSocket 鍦板潃 (浜嬩欢鎺ユ敹)
++NAPCT_WS_URL=ws://127.0.0.1:3001
++
++# NapCat HTTP API 鍦板潃 (鍙戦€佹秷鎭?
++NAPCT_HTTP_URL=http://127.0.0.1:3000
++
++# Bot 鑷繁鐨?QQ 鍙?(鐢ㄤ簬鍒ゆ柇鏄惁琚獲)
++BOT_QQ=123456789
++
++# 鍥炲鏂囨
++REPLY_DECODE_FAIL=缈昏瘧澶辫触锛屽ザ榫欒鐨勮娉曟湁璇摝
++REPLY_NOT_FOUND=娌℃湁妫€娴嬪埌濂堕緳璇紝璇?@鎴?+ 濂堕緳璇?鎴栧紩鐢ㄤ竴鏉″ザ榫欒娑堟伅
++REPLY_TIMEOUT=Bot 鏆傛椂鏃犳硶鍝嶅簲锛岃绋嶅悗鍐嶈瘯
+diff --git a/bot/config.ts b/bot/config.ts
+new file mode 100644
+index 0000000..1e0a135
+--- /dev/null
++++ b/bot/config.ts
+@@ -0,0 +1,78 @@
++import { readFileSync } from "node:fs";
++import { resolve } from "node:path";
++
++export interface ReplyMessages {
++  readonly decodeFail: string;
++  readonly notFound: string;
++  readonly timeout: string;
++}
++
++export interface Config {
++  readonly wsUrl: string;
++  readonly httpUrl: string;
++  readonly botQQ: string;
++  readonly replies: ReplyMessages;
++}
++
++function parseEnvFile(path: string): Record<string, string> {
++  const content = readFileSync(path, "utf-8");
++  const map: Record<string, string> = {};
++  for (const line of content.split("\n")) {
++    const trimmed = line.trim();
++    if (trimmed === "" || trimmed.startsWith("#")) continue;
++    const eq = trimmed.indexOf("=");
++    if (eq === -1) continue;
++    const key = trimmed.slice(0, eq).trim();
++    const value = trimmed.slice(eq + 1).trim();
++    map[key] = value;
++  }
++  return map;
++}
++
++export function loadConfig(): Config {
++  const envPath = resolve(process.cwd(), ".env");
++  let env: Record<string, string> = {};
++  try {
++    env = parseEnvFile(envPath);
++  } catch {
++    console.error("鎵句笉鍒?.env 鏂囦欢锛岃浠?.env.example 澶嶅埗骞跺～鍐欓厤缃?);
++    process.exit(1);
++  }
++
++  const wsUrl = env["NAPCT_WS_URL"] ?? process.env["NAPCT_WS_URL"];
++  const httpUrl = env["NAPCT_HTTP_URL"] ?? process.env["NAPCT_HTTP_URL"];
++  const botQQ = env["BOT_QQ"] ?? process.env["BOT_QQ"];
++
++  if (!wsUrl) {
++    console.error("缂哄皯 NAPCT_WS_URL 閰嶇疆");
++    process.exit(1);
++  }
++  if (!httpUrl) {
++    console.error("缂哄皯 NAPCT_HTTP_URL 閰嶇疆");
++    process.exit(1);
++  }
++  if (!botQQ) {
++    console.error("缂哄皯 BOT_QQ 閰嶇疆");
++    process.exit(1);
++  }
++
++  return {
++    wsUrl,
++    httpUrl,
++    botQQ,
++    replies: {
++      decodeFail:
++        env["REPLY_DECODE_FAIL"] ??
++        process.env["REPLY_DECODE_FAIL"] ??
++        "缈昏瘧澶辫触锛屽ザ榫欒鐨勮娉曟湁璇摝",
++      notFound:
++        env["REPLY_NOT_FOUND"] ??
++        process.env["REPLY_NOT_FOUND"] ??
++        "娌℃湁妫€娴嬪埌濂堕緳璇紝璇?@鎴?+ 濂堕緳璇?鎴栧紩鐢ㄤ竴鏉″ザ榫欒娑堟伅",
++      timeout:
++        env["REPLY_TIMEOUT"] ??
++        process.env["REPLY_TIMEOUT"] ??
++        "Bot 鏆傛椂鏃犳硶鍝嶅簲锛岃绋嶅悗鍐嶈瘯",
++    },
++  };
++}
+diff --git a/bot/handler.ts b/bot/handler.ts
+new file mode 100644
+index 0000000..84ea9c3
+--- /dev/null
++++ b/bot/handler.ts
+@@ -0,0 +1,156 @@
++import { decodeFromNailong, HA } from "../src/nailong.ts";
++import type { Config } from "./config.ts";
++import type {
++  OneBotClient,
++  GroupMessageEvent,
++  MessageSegment,
++} from "./onebot.ts";
++
++const ZWC_RE = /[\u200B-\u200D\u2060]/;
++
++function isNailong(text: string): boolean {
++  return text.includes(HA) && ZWC_RE.test(text);
++}
++
++function extractNailong(rawMessage: string): string | null {
++  if (isNailong(rawMessage)) {
++    return rawMessage;
++  }
++  return null;
++}
++
++function findReplySegment(
++  message: MessageSegment[]
++): { id: string } | null {
++  for (const seg of message) {
++    if (seg.type === "reply") {
++      return seg.data as { id: string };
++    }
++  }
++  return null;
++}
++
++function isAtBot(
++  message: MessageSegment[],
++  botQQ: string
++): boolean {
++  for (const seg of message) {
++    if (seg.type === "at" && seg.data.qq === botQQ) {
++      return true;
++    }
++  }
++  return false;
++}
++
++export class MessageCache {
++  private groups = new Map<number, GroupMessageEvent[]>();
++  private maxSize = 10;
++
++  add(event: GroupMessageEvent): void {
++    const list = this.groups.get(event.group_id) ?? [];
++    list.push(event);
++    if (list.length > this.maxSize) {
++      list.shift();
++    }
++    this.groups.set(event.group_id, list);
++  }
++
++  getPrevious(groupId: number): GroupMessageEvent | undefined {
++    const list = this.groups.get(groupId);
++    if (!list || list.length < 2) return undefined;
++    return list[list.length - 2];
++  }
++}
++
++export function createHandler(
++  client: OneBotClient,
++  config: Config
++): (event: GroupMessageEvent) => Promise<void> {
++  const cache = new MessageCache();
++
++  return async (event: GroupMessageEvent) => {
++    cache.add(event);
++
++    if (!isAtBot(event.message, config.botQQ)) return;
++
++    const nailong = extractNailong(event.raw_message);
++    if (nailong) {
++      await replyWithTranslation(
++        client,
++        event.group_id,
++        event.message_id,
++        nailong,
++        config.replies.decodeFail
++      );
++      return;
++    }
++
++    const replySeg = findReplySegment(event.message);
++    if (replySeg) {
++      try {
++        const replied = await client.getMessage(Number(replySeg.id));
++        const rn = extractNailong(replied.raw_message);
++        if (rn) {
++          await replyWithTranslation(
++            client,
++            event.group_id,
++            Number(replySeg.id),
++            rn,
++            config.replies.decodeFail
++          );
++          return;
++        }
++      } catch {
++        await replyText(client, event, config.replies.timeout);
++        return;
++      }
++    }
++
++    const prev = cache.getPrevious(event.group_id);
++    if (prev) {
++      const pn = extractNailong(prev.raw_message);
++      if (pn) {
++        await replyWithTranslation(
++          client,
++          event.group_id,
++          prev.message_id,
++          pn,
++          config.replies.decodeFail
++        );
++        return;
++      }
++    }
++
++    await replyText(client, event, config.replies.notFound);
++  };
++}
++
++async function replyWithTranslation(
++  client: OneBotClient,
++  groupId: number,
++  replyToId: number,
++  nailongRaw: string,
++  decodeFailText: string
++): Promise<void> {
++  let result: string;
++  try {
++    result = decodeFromNailong(nailongRaw);
++  } catch {
++    result = decodeFailText;
++  }
++  await client.sendGroupMessage(groupId, [
++    { type: "reply", data: { id: String(replyToId) } },
++    { type: "text", data: { text: `缈昏瘧缁撴灉锛?{result}` } },
++  ]);
++}
++
++async function replyText(
++  client: OneBotClient,
++  event: GroupMessageEvent,
++  text: string
++): Promise<void> {
++  await client.sendGroupMessage(event.group_id, [
++    { type: "reply", data: { id: String(event.message_id) } },
++    { type: "text", data: { text } },
++  ]);
++}
+diff --git a/bot/index.ts b/bot/index.ts
+new file mode 100644
+index 0000000..b877e70
+--- /dev/null
++++ b/bot/index.ts
+@@ -0,0 +1,17 @@
++import { loadConfig } from "./config.ts";
++import { OneBotClient } from "./onebot.ts";
++import { createHandler } from "./handler.ts";
++
++const config = loadConfig();
++const client = new OneBotClient(config);
++client.onGroupMessage(createHandler(client, config));
++
++client
++  .connect()
++  .then(() => {
++    console.log(`[bot] NLtranslator Bot 宸插惎鍔?(QQ: ${config.botQQ})`);
++  })
++  .catch((err) => {
++    console.error("[bot] 鍚姩澶辫触:", err.message);
++    process.exit(1);
++  });
+diff --git a/bot/onebot.ts b/bot/onebot.ts
+new file mode 100644
+index 0000000..ed1cd0d
+--- /dev/null
++++ b/bot/onebot.ts
+@@ -0,0 +1,146 @@
++import WebSocket from "ws";
++import type { Config } from "./config.ts";
++
++export interface MessageSegment {
++  type: string;
++  data: Record<string, string>;
++}
++
++export interface OneBotEvent {
++  post_type: string;
++  message_type?: string;
++  sub_type?: string;
++  message_id: number;
++  group_id?: number;
++  user_id?: number;
++  message: MessageSegment[];
++  raw_message: string;
++}
++
++export type GroupMessageEvent = OneBotEvent & {
++  post_type: "message";
++  message_type: "group";
++  group_id: number;
++};
++
++export interface GetMsgResponse {
++  status: string;
++  retcode: number;
++  data: {
++    message_id: number;
++    message: MessageSegment[];
++    raw_message: string;
++  };
++}
++
++export class OneBotClient {
++  private ws: WebSocket | null = null;
++  private handlers: ((e: GroupMessageEvent) => void)[] = [];
++  private reconnectCount = 0;
++  private maxReconnect = 10;
++  private reconnectDelay = 5000;
++  private readonly wsUrl: string;
++  private readonly httpUrl: string;
++
++  constructor(config: Config) {
++    this.wsUrl = config.wsUrl;
++    this.httpUrl = config.httpUrl;
++  }
++
++  connect(): Promise<void> {
++    return new Promise((resolve, reject) => {
++      this.ws = new WebSocket(this.wsUrl);
++      this.ws.on("open", () => {
++        console.log("[onebot] 宸茶繛鎺?NapCat:", this.wsUrl);
++        this.reconnectCount = 0;
++        resolve();
++      });
++      this.ws.on("message", (data) => this.handleMessage(data));
++      this.ws.on("close", () => {
++        console.log("[onebot] 杩炴帴鏂紑");
++        this.tryReconnect();
++      });
++      this.ws.on("error", (err) => {
++        if (this.ws?.readyState !== WebSocket.OPEN) {
++          reject(err);
++        } else {
++          console.error("[onebot] WebSocket 閿欒:", err.message);
++        }
++      });
++    });
++  }
++
++  onGroupMessage(fn: (e: GroupMessageEvent) => void): void {
++    this.handlers.push(fn);
++  }
++
++  async sendGroupMessage(
++    groupId: number,
++    message: MessageSegment[]
++  ): Promise<void> {
++    const url = `${this.httpUrl}/send_group_msg`;
++    const res = await fetch(url, {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ group_id: groupId, message, auto_escape: false }),
++    });
++    if (!res.ok) {
++      throw new Error(`send_group_msg 澶辫触: HTTP ${res.status}`);
++    }
++    const body = (await res.json()) as { status: string; retcode: number };
++    if (body.status !== "ok" || body.retcode !== 0) {
++      throw new Error(`send_group_msg 澶辫触: ${JSON.stringify(body)}`);
++    }
++  }
++
++  async getMessage(messageId: number): Promise<GetMsgResponse["data"]> {
++    const url = `${this.httpUrl}/get_msg`;
++    const res = await fetch(url, {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ message_id: messageId }),
++    });
++    if (!res.ok) {
++      throw new Error(`get_msg 澶辫触: HTTP ${res.status}`);
++    }
++    const body = (await res.json()) as GetMsgResponse;
++    if (body.status !== "ok" || body.retcode !== 0) {
++      throw new Error(`get_msg 澶辫触: ${JSON.stringify(body)}`);
++    }
++    return body.data;
++  }
++
++  private handleMessage(data: WebSocket.RawData): void {
++    try {
++      const event = JSON.parse(data.toString()) as OneBotEvent;
++      if (
++        event.post_type === "message" &&
++        event.message_type === "group" &&
++        event.sub_type === "normal"
++      ) {
++        const ge = event as GroupMessageEvent;
++        for (const fn of this.handlers) {
++          fn(ge);
++        }
++      }
++    } catch {
++      // ignore parse failures
++    }
++  }
++
++  private tryReconnect(): void {
++    if (this.reconnectCount >= this.maxReconnect) {
++      console.error("[onebot] 閲嶈繛娆℃暟宸茶揪涓婇檺锛岄€€鍑?);
++      process.exit(1);
++    }
++    this.reconnectCount++;
++    console.log(
++      `[onebot] ${this.reconnectDelay / 1000}s 鍚庤繘琛岀 ${this.reconnectCount} 娆￠噸杩?..`
++    );
++    setTimeout(() => {
++      this.connect().catch(() => {
++        // reconnect failure will trigger close event again
++      });
++    }, this.reconnectDelay);
++  }
++}
+diff --git a/package-lock.json b/package-lock.json
+index 91d174a..e7ede96 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,20 +1,26 @@
+ {
+   "name": "nl-tranlates",
+   "version": "0.0.0",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "nl-tranlates",
+       "version": "0.0.0",
++      "dependencies": {
++        "ws": "^8.18.0"
++      },
+       "devDependencies": {
++        "@types/node": "^26.1.2",
++        "@types/ws": "^8.18.1",
++        "tsx": "^4.19.0",
+         "typescript": "~5.6.2",
+         "vite": "^6.0.7"
+       }
+     },
+     "node_modules/@esbuild/aix-ppc64": {
+       "version": "0.25.12",
+       "resolved": "https://registry.npmjs.org/@esbuild/aix-ppc64/-/aix-ppc64-0.25.12.tgz",
+       "integrity": "sha512-Hhmwd6CInZ3dwpuGTF8fJG6yoWmsToE+vYgD4nytZVxcu1ulHpUQRAB1UJ8+N1Am3Mz4+xOByoQoSZf4D+CpkA==",
+       "cpu": [
+         "ppc64"
+@@ -821,20 +827,40 @@
+         "win32"
+       ]
+     },
+     "node_modules/@types/estree": {
+       "version": "1.0.9",
+       "resolved": "https://registry.npmjs.org/@types/estree/-/estree-1.0.9.tgz",
+       "integrity": "sha512-GhdPgy1el4/ImP05X05Uw4cw2/M93BCUmnEvWZNStlCzEKME4Fkk+YpoA5OiHNQmoS7Cafb8Xa3Pya8m1Qrzeg==",
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@types/node": {
++      "version": "26.1.2",
++      "resolved": "https://registry.npmjs.org/@types/node/-/node-26.1.2.tgz",
++      "integrity": "sha512-Vu4a5UFA9rIIFJ7rB/Vaafh9lrCQszopTCx6KjFboXTGQbPNasehVR5TEiithSDGyd1DEiUByggTZsg8jukeIg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "undici-types": "~8.3.0"
++      }
++    },
++    "node_modules/@types/ws": {
++      "version": "8.18.1",
++      "resolved": "https://registry.npmjs.org/@types/ws/-/ws-8.18.1.tgz",
++      "integrity": "sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@types/node": "*"
++      }
++    },
+     "node_modules/esbuild": {
+       "version": "0.25.12",
+       "resolved": "https://registry.npmjs.org/esbuild/-/esbuild-0.25.12.tgz",
+       "integrity": "sha512-bbPBYYrtZbkt6Os6FiTLCTFxvq4tt3JKall1vRwshA3fdVztsLAatFaZobhkBC8/BrPetoa0oksYoKXoG4ryJg==",
+       "dev": true,
+       "hasInstallScript": true,
+       "license": "MIT",
+       "bin": {
+         "esbuild": "bin/esbuild"
+       },
+@@ -1037,34 +1063,544 @@
+         "fdir": "^6.5.0",
+         "picomatch": "^4.0.4"
+       },
+       "engines": {
+         "node": ">=12.0.0"
+       },
+       "funding": {
+         "url": "https://github.com/sponsors/SuperchupuDev"
+       }
+     },
++    "node_modules/tsx": {
++      "version": "4.23.9",
++      "resolved": "https://registry.npmjs.org/tsx/-/tsx-4.23.9.tgz",
++      "integrity": "sha512-6q8uTORRGauQVjqMQnKUucLFoeXZAfw6zKvG35GLbdKWbLdeOtZ3H4mhyA5mxuUd2o2cRTskhj59nLLQseUvUw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "esbuild": "~0.28.0"
++      },
++      "bin": {
++        "tsx": "dist/cli.mjs"
++      },
++      "engines": {
++        "node": ">=18.0.0"
++      },
++      "optionalDependencies": {
++        "fsevents": "~2.3.3"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/aix-ppc64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/aix-ppc64/-/aix-ppc64-0.28.1.tgz",
++      "integrity": "sha512-Svl7tq8k/08+p6CXPpRjQ1fKX+1odH/BQbb48fV6fj3CWHhsoIOoY87w1oHXm0qEpkIK3ZfVgp0hed3XBXzXMQ==",
++      "cpu": [
++        "ppc64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "aix"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/android-arm": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/android-arm/-/android-arm-0.28.1.tgz",
++      "integrity": "sha512-0k2F129Xdio1TdJfzJ8sy1Q47vUD2NnwdhiAf7drUN1EBTfPf4hsFCtmMgu/6m8JSzsBrlmVjudMBQqOfG8usQ==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/android-arm64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/android-arm64/-/android-arm64-0.28.1.tgz",
++      "integrity": "sha512-34EGEbCIAgosYz6goLcopX6Mo7NyGv9tfwEM2/7Ce2VcVRk568iSvniGWcUXIy7wEDR1wzolcxcriFVrWYcwBg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/android-x64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/android-x64/-/android-x64-0.28.1.tgz",
++      "integrity": "sha512-dbwY7ltSMDWsRatcRpCnES4F+im88OCUgGZjy52shC7GqHRE/cYlxNbB4Z4UpJswpcc4Qxd2oE/ufM0p61IKng==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/darwin-arm64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/darwin-arm64/-/darwin-arm64-0.28.1.tgz",
++      "integrity": "sha512-TZbWkQY7kvTAXbXUT7uVACR5cMHsDiSz9z7ZKAX/RTq/WJEk3QyRr0wZpNhBDX+/0CtdqUIJlOiodQcta6tY3Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/darwin-x64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/darwin-x64/-/darwin-x64-0.28.1.tgz",
++      "integrity": "sha512-zfdzgK9ACBNZLI/CyHTOx81SyNbM6YXn7rxSgX97VjyiPl9W1i4Ka4fgKECEoFCKGpvBj5qArWIGgQjOwkgskQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/freebsd-arm64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/freebsd-arm64/-/freebsd-arm64-0.28.1.tgz",
++      "integrity": "sha512-wG2EA8ENdEI0qhkSZMjfqrdY+ziCYCPMmtZjjIwOmXFjmyzEHn+UUxk5of+SYsjtfs3VpnlC7QLzSI5hY/rOAw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/freebsd-x64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/freebsd-x64/-/freebsd-x64-0.28.1.tgz",
++      "integrity": "sha512-i7dZ9vQgnvSCzi/rYCXNgtF/U+eKZNJBzu3eTQbRgHnM7tNSizLOkRFAl3qzVc/Op/u5YkHHa4pf/3DOYHthLQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/linux-arm": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/linux-arm/-/linux-arm-0.28.1.tgz",
++      "integrity": "sha512-qVXBOHQS+d5Y722GwJzJUtOLlX7km3CraOaGormF1pDtPd2C/l1SHRPgjLunLGe51Sh5YYWKMFDyV4SxgMQYTQ==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/linux-arm64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/linux-arm64/-/linux-arm64-0.28.1.tgz",
++      "integrity": "sha512-yHs+0uc8+nvEAfAfxrWQKK5peSNzBc4PegcMO0EJ2hT71uA7vB8Ihg2e77R2P7SG5uYjPbHlLLmve4LLLRCf0g==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/linux-ia32": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/linux-ia32/-/linux-ia32-0.28.1.tgz",
++      "integrity": "sha512-d1z4ZuP0ajrfz/FhGT4vv278rX8KnPPJx8i5+AtK7TYbx9Le9F1hyzurZpkEyjkGa9dUGhQow4C1NmeGvqxN2w==",
++      "cpu": [
++        "ia32"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/linux-loong64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/linux-loong64/-/linux-loong64-0.28.1.tgz",
++      "integrity": "sha512-M5sRjUVZrkm1OAPR3dlOYzNmN+loZKGVi1VUQGrwuqLcbR6qeAz+famMhjASeH3YVKvZz+zT1jlh/keC3Rj/lg==",
++      "cpu": [
++        "loong64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/linux-mips64el": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/linux-mips64el/-/linux-mips64el-0.28.1.tgz",
++      "integrity": "sha512-mRObBZeHh2OxcBFPWE/FjylkRgZdYuiTR3vaTozquCGOH14iP9oN4x4Ge81CoIDYQrXmIxpFumJBu5MtZpnQJQ==",
++      "cpu": [
++        "mips64el"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/linux-ppc64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/linux-ppc64/-/linux-ppc64-0.28.1.tgz",
++      "integrity": "sha512-slScBsMAb3GFDcdrCgLwZtPYRoH2H/youv10QiZyRjmsP48fznoveWytSgCI/R0ZcUgpc0ZhIUEx6LHts8yrfQ==",
++      "cpu": [
++        "ppc64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/linux-riscv64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/linux-riscv64/-/linux-riscv64-0.28.1.tgz",
++      "integrity": "sha512-kw0owk1o0GFETUJyW0jc0G4Yzs0BHZn0JDZ8JRT088vjJYX777BAs1fDGxAC+q831qOs2DTC96mNsG2opdfyyQ==",
++      "cpu": [
++        "riscv64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/linux-s390x": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/linux-s390x/-/linux-s390x-0.28.1.tgz",
++      "integrity": "sha512-/lAIjX8aYFRByhh6L5rYtPEDRqa9de/4V/juOXcta5frjvzXO4/sqEtyytse0g3zZFuWu5cDN0MkLz2qRDD2Ag==",
++      "cpu": [
++        "s390x"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/linux-x64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.28.1.tgz",
++      "integrity": "sha512-u/anNYF2mmVOEDwLtnQ1wOr3EZ9sTNGLWrsYGYwHWzGA3Si84IOkHXlbWTD1NB+9/1lcnweYKO54uhxZydNzfA==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/netbsd-arm64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/netbsd-arm64/-/netbsd-arm64-0.28.1.tgz",
++      "integrity": "sha512-oks0DYbLwWMmaakTsCb+zL4E+aHRVLom9IJZOAthMQEPiQmydXHkziYEsGYRx0uNV/IjEKGAV941JzH02pflqw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "netbsd"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/netbsd-x64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/netbsd-x64/-/netbsd-x64-0.28.1.tgz",
++      "integrity": "sha512-aeL6lAnN89Hz43Mlh1G8ARasbuoYvSITDEx0tHh5b7jJnHcssqgjy9Yx430GDpmCa6OyrKoS0aNRjKundRizGg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "netbsd"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/openbsd-arm64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/openbsd-arm64/-/openbsd-arm64-0.28.1.tgz",
++      "integrity": "sha512-MEFJe5C3R8pwXdZ5Y21oo6m7ePiS0d9pWucn99O/wvyJZChoIQKrQDxKrGeW8F5+T0okTHesAmDeiHDTIq0V/Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "openbsd"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/openbsd-x64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/openbsd-x64/-/openbsd-x64-0.28.1.tgz",
++      "integrity": "sha512-i/ZLIOafE0Z8cI/XANJAixoJL/uRAoS2xOA3rb0xN+KK0K177cMAsQYkzHtBrtMXAKuAc7HGgcWiZ/sRC1Nxgw==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "openbsd"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/openharmony-arm64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/openharmony-arm64/-/openharmony-arm64-0.28.1.tgz",
++      "integrity": "sha512-ge+Z7EXFNt2BO1oAMsVpiQ8EwndV9i1xXerAeTIK7AtPs3bKFXQM7nlRxDSIUIMeueR1CNXxqztLzdNeReKBJg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "openharmony"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/sunos-x64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/sunos-x64/-/sunos-x64-0.28.1.tgz",
++      "integrity": "sha512-BEjgtECkL3vY+SaSQ6nzVfiALUeFxpawyp8Jmf5PtYhf1Ug40N1h/hxlhts+f1FvSvarEigdxS3BlSMI2PJLcQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "sunos"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/win32-arm64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/win32-arm64/-/win32-arm64-0.28.1.tgz",
++      "integrity": "sha512-lCv9eK/H6ZJWbE7bh2nw54CZ9M2nupBxJcTsdk/QQnWkdSjKGuxmmH8/GWrlT1eMmZfn4dGcCjRte397WqfQXA==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/win32-ia32": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/win32-ia32/-/win32-ia32-0.28.1.tgz",
++      "integrity": "sha512-zvb/mB2bSCoJOpoCBgYKKpX6YM6mJBlBUVUtVj41DlZJVEB6/0CKlRYxP5wWl1C1ILiCoAU5wZZ4q1P3qeS6Eg==",
++      "cpu": [
++        "ia32"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/@esbuild/win32-x64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/@esbuild/win32-x64/-/win32-x64-0.28.1.tgz",
++      "integrity": "sha512-bm4Mowrv+GXMlpWX++EcXw/iLyd1o3+bJkC2DkWXYVvgZCqD/bSj9ctZeAMC3cIxgjRVR2Dufaiu4YPxr5gW1A==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/tsx/node_modules/esbuild": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmjs.org/esbuild/-/esbuild-0.28.1.tgz",
++      "integrity": "sha512-HrJrvZv5ayxBzPfwphOoNzkzOIIlifzk0KJrGK2c8R4+LKpMtpYLQeUdjnwjWv/LZlkH2laZk+4w78pi99D4Vw==",
++      "dev": true,
++      "hasInstallScript": true,
++      "license": "MIT",
++      "bin": {
++        "esbuild": "bin/esbuild"
++      },
++      "engines": {
++        "node": ">=18"
++      },
++      "optionalDependencies": {
++        "@esbuild/aix-ppc64": "0.28.1",
++        "@esbuild/android-arm": "0.28.1",
++        "@esbuild/android-arm64": "0.28.1",
++        "@esbuild/android-x64": "0.28.1",
++        "@esbuild/darwin-arm64": "0.28.1",
++        "@esbuild/darwin-x64": "0.28.1",
++        "@esbuild/freebsd-arm64": "0.28.1",
++        "@esbuild/freebsd-x64": "0.28.1",
++        "@esbuild/linux-arm": "0.28.1",
++        "@esbuild/linux-arm64": "0.28.1",
++        "@esbuild/linux-ia32": "0.28.1",
++        "@esbuild/linux-loong64": "0.28.1",
++        "@esbuild/linux-mips64el": "0.28.1",
++        "@esbuild/linux-ppc64": "0.28.1",
++        "@esbuild/linux-riscv64": "0.28.1",
++        "@esbuild/linux-s390x": "0.28.1",
++        "@esbuild/linux-x64": "0.28.1",
++        "@esbuild/netbsd-arm64": "0.28.1",
++        "@esbuild/netbsd-x64": "0.28.1",
++        "@esbuild/openbsd-arm64": "0.28.1",
++        "@esbuild/openbsd-x64": "0.28.1",
++        "@esbuild/openharmony-arm64": "0.28.1",
++        "@esbuild/sunos-x64": "0.28.1",
++        "@esbuild/win32-arm64": "0.28.1",
++        "@esbuild/win32-ia32": "0.28.1",
++        "@esbuild/win32-x64": "0.28.1"
++      }
++    },
+     "node_modules/typescript": {
+       "version": "5.6.3",
+       "resolved": "https://registry.npmjs.org/typescript/-/typescript-5.6.3.tgz",
+       "integrity": "sha512-hjcS1mhfuyi4WW8IWtjP7brDrG2cuDZukyrYrSauoXGNgx0S7zceP07adYkJycEr56BOUTNPzbInooiN3fn1qw==",
+       "dev": true,
+       "license": "Apache-2.0",
+       "bin": {
+         "tsc": "bin/tsc",
+         "tsserver": "bin/tsserver"
+       },
+       "engines": {
+         "node": ">=14.17"
+       }
+     },
++    "node_modules/undici-types": {
++      "version": "8.3.0",
++      "resolved": "https://registry.npmjs.org/undici-types/-/undici-types-8.3.0.tgz",
++      "integrity": "sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/vite": {
+       "version": "6.4.3",
+       "resolved": "https://registry.npmjs.org/vite/-/vite-6.4.3.tgz",
+       "integrity": "sha512-NTKlcQjlAK7MlQoyb6LgaqHc8sso/pVyUJYWMws3jg21uTJw/LddqIFPcPqP6PzpgbIcZyKI85sFE4HBrQDA8A==",
+       "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "esbuild": "^0.25.0",
+         "fdir": "^6.4.4",
+         "picomatch": "^4.0.2",
+@@ -1125,13 +1661,34 @@
+         "terser": {
+           "optional": true
+         },
+         "tsx": {
+           "optional": true
+         },
+         "yaml": {
+           "optional": true
+         }
+       }
++    },
++    "node_modules/ws": {
++      "version": "8.21.2",
++      "resolved": "https://registry.npmjs.org/ws/-/ws-8.21.2.tgz",
++      "integrity": "sha512-54dMVAo4WIe6SKy3vBgN+9bJZqqQ8IMRevAkOLQALhi49qkkQDQfWdAZ8KQlXiEabw88ARXXdUrlvtbKQX+aKw==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=10.0.0"
++      },
++      "peerDependencies": {
++        "bufferutil": "^4.0.1",
++        "utf-8-validate": ">=5.0.2"
++      },
++      "peerDependenciesMeta": {
++        "bufferutil": {
++          "optional": true
++        },
++        "utf-8-validate": {
++          "optional": true
++        }
++      }
+     }
+   }
+ }
+diff --git a/package.json b/package.json
+index 8b3e98d..03dcd5d 100644
+--- a/package.json
++++ b/package.json
+@@ -1,15 +1,22 @@
+ {
+   "name": "nl-tranlates",
+   "private": true,
+   "version": "0.0.0",
+   "type": "module",
+   "scripts": {
+     "dev": "vite",
+     "build": "tsc && vite build",
+-    "preview": "vite preview"
++    "preview": "vite preview",
++    "bot": "tsx bot/index.ts"
++  },
++  "dependencies": {
++    "ws": "^8.18.0"
+   },
+   "devDependencies": {
++    "@types/node": "^26.1.2",
++    "@types/ws": "^8.18.1",
++    "tsx": "^4.19.0",
+     "typescript": "~5.6.2",
+     "vite": "^6.0.7"
+   }
+ }
+diff --git a/superpowers/docs/plans/2026-08-06-nailong-qqbot.md b/superpowers/docs/plans/2026-08-06-nailong-qqbot.md
+new file mode 100644
+index 0000000..93a55a2
+--- /dev/null
++++ b/superpowers/docs/plans/2026-08-06-nailong-qqbot.md
+@@ -0,0 +1,716 @@
++# NLtranslator QQ Bot 鈥?Implementation Plan
++
++> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
++
++**Goal:** Add a QQ group-chat bot to the existing NLtranslator repo that detects 濂堕緳璇?(cipher text with 鍝?+ zero-width chars), decodes it, and replies with the original text when @mentioned.
++
++**Architecture:** A standalone Node.js process in `bot/` connects to NapCat via WebSocket for events and HTTP API for sending messages. It directly imports `src/nailong.ts` for translation and uses a simple in-memory cache for "previous message" lookback.
++
++**Tech Stack:** TypeScript (executed via `tsx`), `ws` for WebSocket, Node.js built-in `fetch` for HTTP API calls. Zero bot frameworks.
++
++## Global Constraints
++
++- `src/nailong.ts` must not be modified
++- No external bot frameworks (no icqq, oicq, koishi, yunzai)
++- All reply text comes from `.env` config
++- NapCat connection URLs come from `.env` config
++- Runs via `npm run bot`, TypeScript executed directly with `tsx`
++
++---
++
++## File Map
++
++| File | Action | Responsibility |
++|------|--------|----------------|
++| `package.json` | Modify | Add `ws` dependency, `tsx` devDependency, `bot` script |
++| `tsconfig.json` | Modify | Add `bot/` to `include` |
++| `.env.example` | Create | Configuration template for users |
++| `bot/config.ts` | Create | Read `.env`, export typed config object |
++| `bot/onebot.ts` | Create | OneBot v11 WS client + HTTP API wrapper |
++| `bot/handler.ts` | Create | Message processing: detect @Bot, extract 濂堕緳璇? decode, format reply |
++| `bot/index.ts` | Create | Entry point: wire config 鈫?client 鈫?handler, start & handle reconnect |
++
++---
++
++### Task 1: Install dependencies & update package.json
++
++**Files:**
++- Modify: `package.json`
++
++**Interfaces:**
++- Produces: `npm run bot` script, `ws` importable, `tsx` executable
++
++- [ ] **Step 1: Add `ws` dependency and `tsx` devDependency, add `bot` script**
++
++Read the current `package.json`, then replace it with:
++
++```json
++{
++  "name": "nl-tranlates",
++  "private": true,
++  "version": "0.0.0",
++  "type": "module",
++  "scripts": {
++    "dev": "vite",
++    "build": "tsc && vite build",
++    "preview": "vite preview",
++    "bot": "tsx bot/index.ts"
++  },
++  "dependencies": {
++    "ws": "^8.18.0"
++  },
++  "devDependencies": {
++    "tsx": "^4.19.0",
++    "typescript": "~5.6.2",
++    "vite": "^6.0.7"
++  }
++}
++```
++
++- [ ] **Step 2: Install**
++
++```bash
++npm install
++```
++
++- [ ] **Step 3: Commit**
++
++```bash
++git add package.json package-lock.json
++git commit -m "chore: add ws, tsx, and bot script"
++```
++
++---
++
++### Task 2: Create config module
++
++**Files:**
++- Create: `bot/config.ts`
++- Create: `.env.example`
++
++**Interfaces:**
++- Produces: `Config` interface, `loadConfig(): Config`
++
++`Config` type:
++```typescript
++interface Config {
++  readonly wsUrl: string;
++  readonly httpUrl: string;
++  readonly botQQ: string;
++  readonly replies: {
++    readonly decodeFail: string;
++    readonly notFound: string;
++    readonly timeout: string;
++  };
++}
++```
++
++- [ ] **Step 1: Create `.env.example`**
++
++```env
++# NapCat WebSocket 鍦板潃 (浜嬩欢鎺ユ敹)
++NAPCT_WS_URL=ws://127.0.0.1:3001
++
++# NapCat HTTP API 鍦板潃 (鍙戦€佹秷鎭?
++NAPCT_HTTP_URL=http://127.0.0.1:3000
++
++# Bot 鑷繁鐨?QQ 鍙?(鐢ㄤ簬鍒ゆ柇鏄惁琚獲)
++BOT_QQ=123456789
++
++# 鍥炲鏂囨
++REPLY_DECODE_FAIL=缈昏瘧澶辫触锛屽ザ榫欒鐨勮娉曟湁璇摝
++REPLY_NOT_FOUND=娌℃湁妫€娴嬪埌濂堕緳璇紝璇?@鎴?+ 濂堕緳璇?鎴栧紩鐢ㄤ竴鏉″ザ榫欒娑堟伅
++REPLY_TIMEOUT=Bot 鏆傛椂鏃犳硶鍝嶅簲锛岃绋嶅悗鍐嶈瘯
++```
++
++- [ ] **Step 2: Write `bot/config.ts`**
++
++```typescript
++import { readFileSync } from "node:fs";
++import { resolve } from "node:path";
++
++export interface ReplyMessages {
++  readonly decodeFail: string;
++  readonly notFound: string;
++  readonly timeout: string;
++}
++
++export interface Config {
++  readonly wsUrl: string;
++  readonly httpUrl: string;
++  readonly botQQ: string;
++  readonly replies: ReplyMessages;
++}
++
++function parseEnvFile(path: string): Record<string, string> {
++  const content = readFileSync(path, "utf-8");
++  const map: Record<string, string> = {};
++  for (const line of content.split("\n")) {
++    const trimmed = line.trim();
++    if (trimmed === "" || trimmed.startsWith("#")) continue;
++    const eq = trimmed.indexOf("=");
++    if (eq === -1) continue;
++    const key = trimmed.slice(0, eq).trim();
++    const value = trimmed.slice(eq + 1).trim();
++    map[key] = value;
++  }
++  return map;
++}
++
++export function loadConfig(): Config {
++  const envPath = resolve(process.cwd(), ".env");
++  let env: Record<string, string>;
++  try {
++    env = parseEnvFile(envPath);
++  } catch {
++    console.error("鎵句笉鍒?.env 鏂囦欢锛岃浠?.env.example 澶嶅埗骞跺～鍐欓厤缃?);
++    process.exit(1);
++  }
++
++  const wsUrl = env["NAPCT_WS_URL"] ?? process.env["NAPCT_WS_URL"];
++  const httpUrl = env["NAPCT_HTTP_URL"] ?? process.env["NAPCT_HTTP_URL"];
++  const botQQ = env["BOT_QQ"] ?? process.env["BOT_QQ"];
++
++  if (!wsUrl) {
++    console.error("缂哄皯 NAPCT_WS_URL 閰嶇疆");
++    process.exit(1);
++  }
++  if (!httpUrl) {
++    console.error("缂哄皯 NAPCT_HTTP_URL 閰嶇疆");
++    process.exit(1);
++  }
++  if (!botQQ) {
++    console.error("缂哄皯 BOT_QQ 閰嶇疆");
++    process.exit(1);
++  }
++
++  return {
++    wsUrl,
++    httpUrl,
++    botQQ,
++    replies: {
++      decodeFail:
++        env["REPLY_DECODE_FAIL"] ??
++        process.env["REPLY_DECODE_FAIL"] ??
++        "缈昏瘧澶辫触锛屽ザ榫欒鐨勮娉曟湁璇摝",
++      notFound:
++        env["REPLY_NOT_FOUND"] ??
++        process.env["REPLY_NOT_FOUND"] ??
++        "娌℃湁妫€娴嬪埌濂堕緳璇紝璇?@鎴?+ 濂堕緳璇?鎴栧紩鐢ㄤ竴鏉″ザ榫欒娑堟伅",
++      timeout:
++        env["REPLY_TIMEOUT"] ??
++        process.env["REPLY_TIMEOUT"] ??
++        "Bot 鏆傛椂鏃犳硶鍝嶅簲锛岃绋嶅悗鍐嶈瘯",
++    },
++  };
++}
++```
++
++- [ ] **Step 3: Commit**
++
++```bash
++git add bot/config.ts .env.example
++git commit -m "feat: add config module and .env.example"
++```
++
++---
++
++### Task 3: Create OneBot v11 client
++
++**Files:**
++- Create: `bot/onebot.ts`
++
++**Interfaces:**
++- Consumes: `Config` (from Task 2)
++- Produces:
++  - `MessageSegment` type: `{ type: string; data: Record<string, string> }`
++  - `GroupMessageEvent` type (see code below)
++  - `GetMsgResponse` type (see code below)
++  - `OneBotClient` class:
++    - `constructor(config: Config)`
++    - `connect(): Promise<void>` 鈥?establish WebSocket, reconnect on close
++    - `onGroupMessage(fn: (e: GroupMessageEvent) => void): void`
++    - `sendGroupMessage(groupId: number, message: MessageSegment[]): Promise<void>`
++    - `getMessage(messageId: number): Promise<GetMsgResponse["data"]>`
++
++- [ ] **Step 1: Write `bot/onebot.ts`**
++
++```typescript
++import WebSocket from "ws";
++import type { Config } from "./config.ts";
++
++export interface MessageSegment {
++  type: string;
++  data: Record<string, string>;
++}
++
++export interface OneBotEvent {
++  post_type: string;
++  message_type?: string;
++  sub_type?: string;
++  message_id: number;
++  group_id?: number;
++  user_id?: number;
++  message: MessageSegment[];
++  raw_message: string;
++}
++
++export type GroupMessageEvent = OneBotEvent & {
++  post_type: "message";
++  message_type: "group";
++  group_id: number;
++};
++
++export interface GetMsgResponse {
++  status: string;
++  retcode: number;
++  data: {
++    message_id: number;
++    message: MessageSegment[];
++    raw_message: string;
++  };
++}
++
++export class OneBotClient {
++  private ws: WebSocket | null = null;
++  private handlers: ((e: GroupMessageEvent) => void)[] = [];
++  private reconnectCount = 0;
++  private maxReconnect = 10;
++  private reconnectDelay = 5000;
++  private readonly wsUrl: string;
++  private readonly httpUrl: string;
++
++  constructor(config: Config) {
++    this.wsUrl = config.wsUrl;
++    this.httpUrl = config.httpUrl;
++  }
++
++  connect(): Promise<void> {
++    return new Promise((resolve, reject) => {
++      this.ws = new WebSocket(this.wsUrl);
++      this.ws.on("open", () => {
++        console.log("[onebot] 宸茶繛鎺?NapCat:", this.wsUrl);
++        this.reconnectCount = 0;
++        resolve();
++      });
++      this.ws.on("message", (data) => this.handleMessage(data));
++      this.ws.on("close", () => {
++        console.log("[onebot] 杩炴帴鏂紑");
++        this.tryReconnect();
++      });
++      this.ws.on("error", (err) => {
++        if (this.ws?.readyState !== WebSocket.OPEN) {
++          reject(err);
++        } else {
++          console.error("[onebot] WebSocket 閿欒:", err.message);
++        }
++      });
++    });
++  }
++
++  onGroupMessage(fn: (e: GroupMessageEvent) => void): void {
++    this.handlers.push(fn);
++  }
++
++  async sendGroupMessage(
++    groupId: number,
++    message: MessageSegment[]
++  ): Promise<void> {
++    const url = `${this.httpUrl}/send_group_msg`;
++    const res = await fetch(url, {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ group_id: groupId, message, auto_escape: false }),
++    });
++    if (!res.ok) {
++      throw new Error(`send_group_msg 澶辫触: HTTP ${res.status}`);
++    }
++    const body = (await res.json()) as { status: string; retcode: number };
++    if (body.status !== "ok" || body.retcode !== 0) {
++      throw new Error(`send_group_msg 澶辫触: ${JSON.stringify(body)}`);
++    }
++  }
++
++  async getMessage(messageId: number): Promise<GetMsgResponse["data"]> {
++    const url = `${this.httpUrl}/get_msg`;
++    const res = await fetch(url, {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ message_id: messageId }),
++    });
++    if (!res.ok) {
++      throw new Error(`get_msg 澶辫触: HTTP ${res.status}`);
++    }
++    const body = (await res.json()) as GetMsgResponse;
++    if (body.status !== "ok" || body.retcode !== 0) {
++      throw new Error(`get_msg 澶辫触: ${JSON.stringify(body)}`);
++    }
++    return body.data;
++  }
++
++  private handleMessage(data: WebSocket.RawData): void {
++    try {
++      const event = JSON.parse(data.toString()) as OneBotEvent;
++      if (
++        event.post_type === "message" &&
++        event.message_type === "group" &&
++        event.sub_type === "normal"
++      ) {
++        const ge = event as GroupMessageEvent;
++        for (const fn of this.handlers) {
++          fn(ge);
++        }
++      }
++    } catch {
++      // 蹇界暐瑙ｆ瀽澶辫触鐨勬秷鎭?+    }
++  }
++
++  private tryReconnect(): void {
++    if (this.reconnectCount >= this.maxReconnect) {
++      console.error("[onebot] 閲嶈繛娆℃暟宸茶揪涓婇檺锛岄€€鍑?);
++      process.exit(1);
++    }
++    this.reconnectCount++;
++    console.log(
++      `[onebot] ${this.reconnectDelay / 1000}s 鍚庤繘琛岀 ${this.reconnectCount} 娆￠噸杩?..`
++    );
++    setTimeout(() => {
++      this.connect().catch(() => {
++        // 閲嶈繛澶辫触鐢?close 浜嬩欢鍐嶆瑙﹀彂
++      });
++    }, this.reconnectDelay);
++  }
++}
++```
++
++- [ ] **Step 2: Commit**
++
++```bash
++git add bot/onebot.ts
++git commit -m "feat: add OneBot v11 client with WS and HTTP API"
++```
++
++---
++
++### Task 4: Create message handler
++
++**Files:**
++- Create: `bot/handler.ts`
++
++**Interfaces:**
++- Consumes:
++  - `decodeFromNailong` from `../src/nailong.ts`
++  - `HA` from `../src/nailong.ts`
++  - `OneBotClient` from `./onebot.ts`
++  - `GroupMessageEvent`, `MessageSegment` from `./onebot.ts`
++  - `Config` from `./config.ts`
++- Produces:
++  - `MessageCache` class: `add(event: GroupMessageEvent): void`, `getPrevious(groupId: number): GroupMessageEvent | undefined`
++  - `createHandler(client: OneBotClient, config: Config): (event: GroupMessageEvent) => Promise<void>`
++
++- [ ] **Step 1: Write `bot/handler.ts`**
++
++```typescript
++import { decodeFromNailong, HA } from "../src/nailong.ts";
++import type { Config } from "./config.ts";
++import type {
++  OneBotClient,
++  GroupMessageEvent,
++  MessageSegment,
++} from "./onebot.ts";
++
++const ZWC_RE = /[\u200B-\u200D\u2060]/;
++
++function isNailong(text: string): boolean {
++  return text.includes(HA) && ZWC_RE.test(text);
++}
++
++function extractNailong(rawMessage: string): string | null {
++  if (isNailong(rawMessage)) {
++    return rawMessage;
++  }
++  return null;
++}
++
++function findReplySegment(
++  message: MessageSegment[]
++): { id: string } | null {
++  for (const seg of message) {
++    if (seg.type === "reply") {
++      return seg.data as { id: string };
++    }
++  }
++  return null;
++}
++
++function isAtBot(
++  message: MessageSegment[],
++  botQQ: string
++): boolean {
++  for (const seg of message) {
++    if (seg.type === "at" && seg.data.qq === botQQ) {
++      return true;
++    }
++  }
++  return false;
++}
++
++export class MessageCache {
++  private groups = new Map<number, GroupMessageEvent[]>();
++  private maxSize = 10;
++
++  add(event: GroupMessageEvent): void {
++    const list = this.groups.get(event.group_id) ?? [];
++    list.push(event);
++    if (list.length > this.maxSize) {
++      list.shift();
++    }
++    this.groups.set(event.group_id, list);
++  }
++
++  getPrevious(groupId: number): GroupMessageEvent | undefined {
++    const list = this.groups.get(groupId);
++    if (!list || list.length < 2) return undefined;
++    return list[list.length - 2];
++  }
++}
++
++export function createHandler(
++  client: OneBotClient,
++  config: Config
++): (event: GroupMessageEvent) => Promise<void> {
++  const cache = new MessageCache();
++
++  return async (event: GroupMessageEvent) => {
++    cache.add(event);
++
++    if (!isAtBot(event.message, config.botQQ)) return;
++
++    const nailong = extractNailong(event.raw_message);
++    if (nailong) {
++      await replyWithTranslation(
++        client,
++        event.group_id,
++        event.message_id,
++        nailong,
++        config.replies.decodeFail
++      );
++      return;
++    }
++
++    const replySeg = findReplySegment(event.message);
++    if (replySeg) {
++      try {
++        const replied = await client.getMessage(Number(replySeg.id));
++        const rn = extractNailong(replied.raw_message);
++        if (rn) {
++          await replyWithTranslation(
++            client,
++            event.group_id,
++            Number(replySeg.id),
++            rn,
++            config.replies.decodeFail
++          );
++          return;
++        }
++      } catch {
++        await replyText(client, event, config.replies.timeout);
++        return;
++      }
++    }
++
++    const prev = cache.getPrevious(event.group_id);
++    if (prev) {
++      const pn = extractNailong(prev.raw_message);
++      if (pn) {
++        await replyWithTranslation(
++          client,
++          event.group_id,
++          prev.message_id,
++          pn,
++          config.replies.decodeFail
++        );
++        return;
++      }
++    }
++
++    await replyText(client, event, config.replies.notFound);
++  };
++}
++
++async function replyWithTranslation(
++  client: OneBotClient,
++  groupId: number,
++  replyToId: number,
++  nailongRaw: string,
++  decodeFailText: string
++): Promise<void> {
++  let result: string;
++  try {
++    result = decodeFromNailong(nailongRaw);
++  } catch {
++    result = decodeFailText;
++  }
++  await client.sendGroupMessage(groupId, [
++    { type: "reply", data: { id: String(replyToId) } },
++    { type: "text", data: { text: `缈昏瘧缁撴灉锛?{result}` } },
++  ]);
++}
++
++async function replyText(
++  client: OneBotClient,
++  event: GroupMessageEvent,
++  text: string
++): Promise<void> {
++  await client.sendGroupMessage(event.group_id, [
++    { type: "reply", data: { id: String(event.message_id) } },
++    { type: "text", data: { text } },
++  ]);
++}
++```
++
++- [ ] **Step 2: Commit**
++
++```bash
++git add bot/handler.ts
++git commit -m "feat: add message handler with translation logic"
++```
++
++---
++
++### Task 5: Create bot entry point
++
++**Files:**
++- Create: `bot/index.ts`
++
++**Interfaces:**
++- Consumes:
++  - `loadConfig` from `./config.ts`
++  - `OneBotClient` from `./onebot.ts`
++  - `createHandler` from `./handler.ts`
++- Produces: (runnable process)
++
++- [ ] **Step 1: Write `bot/index.ts`**
++
++```typescript
++import { loadConfig } from "./config.ts";
++import { OneBotClient } from "./onebot.ts";
++import { createHandler } from "./handler.ts";
++
++const config = loadConfig();
++const client = new OneBotClient(config);
++client.onGroupMessage(createHandler(client, config));
++
++client
++  .connect()
++  .then(() => {
++    console.log(`[bot] NLtranslator Bot 宸插惎鍔?(QQ: ${config.botQQ})`);
++  })
++  .catch((err) => {
++    console.error("[bot] 鍚姩澶辫触:", err.message);
++    process.exit(1);
++  });
++```
++
++- [ ] **Step 2: Commit**
++
++```bash
++git add bot/index.ts
++git commit -m "feat: add bot entry point"
++```
++
++---
++
++### Task 6: Update tsconfig to include bot/
++
++**Files:**
++- Modify: `tsconfig.json`
++
++- [ ] **Step 1: Update `tsconfig.json` include**
++
++Change `"include": ["src"]` to `"include": ["src", "bot"]`:
++
++```json
++{
++  "compilerOptions": {
++    "target": "ES2020",
++    "useDefineForClassFields": true,
++    "module": "ESNext",
++    "lib": ["ES2020", "DOM", "DOM.Iterable"],
++    "skipLibCheck": true,
++    "moduleResolution": "bundler",
++    "allowImportingTsExtensions": true,
++    "isolatedModules": true,
++    "moduleDetection": "force",
++    "noEmit": true,
++    "strict": true,
++    "noUnusedLocals": true,
++    "noUnusedParameters": true,
++    "noFallthroughCasesInSwitch": true
++  },
++  "include": ["src", "bot"]
++}
++```
++
++- [ ] **Step 2: Verify `tsx` can run the bot**
++
++```bash
++npx tsx bot/index.ts
++```
++
++Expected: Either an error about missing `.env` (meaning code is parsed) or a connection error (if NapCat isn't running).
++
++- [ ] **Step 3: Commit**
++
++```bash
++git add tsconfig.json
++git commit -m "chore: add bot/ to tsconfig include"
++```
++
++---
++
++### Task 7: Manual integration test
++
++**Files:**
++- No code changes 鈥?verification only
++
++- [ ] **Step 1: Create `.env` from `.env.example`**
++
++```bash
++copy .env.example .env
++```
++
++Edit `.env` to fill in your QQ number for `BOT_QQ`, keep default WS/HTTP URLs.
++
++- [ ] **Step 2: Start NapCat and verify connection**
++
++Start NapCat on the same machine. Run:
++
++```bash
++npm run bot
++```
++
++Expected output:
++```
++[onebot] 宸茶繛鎺?NapCat: ws://127.0.0.1:3001
++[bot] NLtranslator Bot 宸插惎鍔?(QQ: <浣犵殑QQ鍙?)
++```
++
++- [ ] **Step 3: Test translation flow**
++
++1. In a QQ group where the bot is present, have someone send: `鍝圼zero-width chars]...` (use the web app to generate a 濂堕緳璇?string and paste it)
++2. Another member @bots the original message
++3. Bot should reply with translation
++
++- [ ] **Step 4: Test fail cases**
++
++- @bot with no 濂堕緳璇?鈫?should reply with `REPLY_NOT_FOUND`
++- @bot with malformed 濂堕緳璇?鈫?should reply with `REPLY_DECODE_FAIL`
++
++- [ ] **Step 5: Commit** (if .env.example was updated)
++
++```bash
++git add .env.example
++git commit -m "docs: finalize .env.example"
++```
+diff --git a/superpowers/docs/specs/2026-08-06-nailong-qqbot-design.md b/superpowers/docs/specs/2026-08-06-nailong-qqbot-design.md
+new file mode 100644
+index 0000000..8a8171b
+--- /dev/null
++++ b/superpowers/docs/specs/2026-08-06-nailong-qqbot-design.md
+@@ -0,0 +1,143 @@
++# NLtranslator QQ Bot 鈥?Design Spec
++
++> 鍩轰簬鐜版湁濂堕緳璇炕璇戝櫒锛屽垱寤轰竴涓?QQ 缇よ亰鏈哄櫒浜猴紝鑷姩缈昏瘧濂堕緳璇€?+
++## Overview
++
++鍦?NLtranslator 浠撳簱涓柊澧炰竴涓?QQ Bot 杩涚▼锛岄€氳繃 NapCat锛圤neBot v11 鍗忚锛夋帴鍏?QQ 缇よ亰銆傜兢鎴愬憳 @鏈哄櫒浜?鍗冲彲瑙﹀彂缈昏瘧锛屾敮鎸佷笁绉嶇炕璇戞潵婧愩€?+
++## Architecture
++
++```
++ 鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?   WS (浜嬩欢)    鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?  HTTP API    鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?+ 鈹? NapCat 鈹?鈫愨攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ 鈹?  Bot    鈹?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈫?鈹? NapCat  鈹?+ 鈹? (QQ)   鈹?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈫?鈹?(Node.js)鈹?鈫愨攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ 鈹? (QQ)    鈹?+ 鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?  缇ゆ秷鎭?push    鈹斺攢鈹€鈹€鈹€鈹攢鈹€鈹€鈹€鈹€鈹? 鍙戦€佹秷鎭?     鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?+                                  鈹?+                                  鈹?import
++                           鈹屸攢鈹€鈹€鈹€鈹€鈹€鈻尖攢鈹€鈹€鈹€鈹€鈹€鈹?+                           鈹? nailong.ts 鈹?+                           鈹?(translater)鈹?+                           鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?+```
++
++- **NapCat**: 鎺ュ湪鐢ㄦ埛 QQ 鍙蜂笂锛屽疄鐜?OneBot v11 鍗忚锛屾彁渚?WebSocket 浜嬩欢鎺ㄩ€佸拰 HTTP API
++- **Bot**: 鐙珛 Node.js 杩涚▼锛岄€氳繃 `ws` 杩炴帴 NapCat 鎺ユ敹浜嬩欢锛岄€氳繃 HTTP 鍙戦€佹秷鎭?+- **nailong.ts**: 澶嶇敤鐜版湁缈昏瘧鏍稿績锛岄浂鏀瑰姩
++
++## Project Structure
++
++```
++NLtranslator/                    (鐜版湁浠撳簱)
++鈹溾攢鈹€ bot/                          (鏂板鐩綍)
++鈹?  鈹溾攢鈹€ index.ts                  Bot 鍏ュ彛锛屽惎鍔?& 杩炴帴
++鈹?  鈹溾攢鈹€ handler.ts                娑堟伅澶勭悊 & 缈昏瘧璋冨害
++鈹?  鈹溾攢鈹€ onebot.ts                 OneBot v11 瀹㈡埛绔皝瑁?+鈹?  鈹斺攢鈹€ config.ts                 浠?.env 璇诲彇閰嶇疆
++鈹溾攢鈹€ src/
++鈹?  鈹斺攢鈹€ nailong.ts                缈昏瘧鏍稿績 (鐜版湁鏂囦欢锛屼笉鍔?
++鈹溾攢鈹€ .env.example                  鏂板锛岄厤缃ā鏉?+鈹溾攢鈹€ package.json                  淇敼锛屽姞渚濊禆鍜岃剼鏈?+鈹斺攢鈹€ tsconfig.json                 淇敼锛宨nclude bot/
++```
++
++## Communication Protocol
++
++### 鎺ユ敹浜嬩欢锛圵ebSocket锛?+
++Bot 浣滀负 WS 瀹㈡埛绔繛鎺?NapCat锛坄ws://127.0.0.1:3001`锛夛紝鏀跺埌 `message.group` 浜嬩欢鏃惰Е鍙戝鐞嗐€?+
++鍏抽敭瀛楁锛?+- `message_id`: 鐢ㄤ簬寮曠敤鍥炲
++- `group_id`: 鍙戦€佸洖澶嶇殑鐩爣缇?+- `user_id`: 鍙戦€佽€?QQ
++- `message`: CQ 鐮佹秷鎭鏁扮粍锛屼粠涓В鏋?@mention 鍜屾枃鏈?+- `raw_message`: 绾枃鏈紝鐢ㄤ簬濂堕緳璇娴?+
++### 鍙戦€佹秷鎭紙HTTP API锛?+
++- `POST /send_group_msg` 鈥?鍙戦€佺兢娑堟伅锛堝甫 `[CQ:reply]` 寮曠敤锛?+- `POST /get_msg` 鈥?鑾峰彇浠绘剰娑堟伅璇︽儏锛堢敤浜庤幏鍙栬寮曠敤娑堟伅鍐呭锛?+
++### 濂堕緳璇娴?+
++娑堟伅婊¤冻浠ヤ笅鏉′欢鍗冲垽瀹氫负濂堕緳璇細
++1. 鍖呭惈 `鍝坄 (`\u54C8`)
++2. 鍖呭惈闆跺瀛楃 (`[\u200B-\u200D\u2060]`)
++
++## Trigger & Translation Flow
++
++```
++缇ゆ秷鎭簨浠?+  鈹?+  鈹溾攢 娑堟伅鏈 @Bot 鈫?蹇界暐锛堜絾浠嶇紦瀛樿娑堟伅锛?+  鈹?+  鈹斺攢 娑堟伅琚?@Bot 鈫?+        鈹?+        鈹溾攢 娑堟伅浣撳惈濂堕緳璇?鈫?decodeFromNailong() 鈫?寮曠敤鍥炲缈昏瘧
++        鈹?+        鈹溾攢 涓嶅惈濂堕緳璇紝浣嗘湁 reply 寮曠敤 鈫?getMsg() 鑾峰彇琚紩鐢ㄦ秷鎭?+        鈹?    鈹斺攢 鍚ザ榫欒 鈫?瑙ｇ爜 鈫?寮曠敤鍥炲琚紩鐢ㄦ秷鎭?+ 缈昏瘧
++        鈹?+        鈹溾攢 涓嶅惈濂堕緳璇紝鏃犲紩鐢?鈫?鏌ョ紦瀛樹腑鐨勪笂涓€鏉℃秷鎭?+        鈹?    鈹斺攢 鍚ザ榫欒 鈫?瑙ｇ爜 鈫?寮曠敤鍥炲涓婁竴鏉℃秷鎭?+ 缈昏瘧
++        鈹?+        鈹斺攢 閮戒笉鍚?鈫?寮曠敤鍥炲鎻愮ず"娌℃湁妫€娴嬪埌濂堕緳璇?
++```
++
++## Reply Format
++
++鎵€鏈夌炕璇戝洖澶嶅潎寮曠敤鍘熸秷鎭細
++
++```
++[CQ:reply,id=<鍘熸秷鎭疘D>]
++缈昏瘧缁撴灉锛?瑙ｇ爜鍚庢枃鏈?
++```
++
++閿欒鍥炲鍚岀悊锛屽紩鐢ㄥ憡鐭ュけ璐ュ師鍥犮€?+
++## Configuration
++
++`.env` 鏂囦欢锛堜笉鎻愪氦锛宍.env.example` 浣滄ā鏉匡級锛?+
++```env
++NAPCT_WS_URL=ws://127.0.0.1:3001
++NAPCT_HTTP_URL=http://127.0.0.1:3000
++BOT_QQ=<浣犵殑QQ鍙?
++REPLY_DECODE_FAIL=缈昏瘧澶辫触锛屽ザ榫欒鐨勮娉曟湁璇摝
++REPLY_NOT_FOUND=娌℃湁妫€娴嬪埌濂堕緳璇紝璇?@鎴?+ 濂堕緳璇?鎴栧紩鐢ㄤ竴鏉″ザ榫欒娑堟伅
++REPLY_TIMEOUT=Bot 鏆傛椂鏃犳硶鍝嶅簲锛岃绋嶅悗鍐嶈瘯
++```
++
++## Dependencies
++
++| 鍖?| 绫诲瀷 | 鐢ㄩ€?|
++|------|------|------|
++| `ws` | runtime | WebSocket 瀹㈡埛绔?|
++| `tsx` | dev | 鐩存帴鎵ц TypeScript |
++
++## Error Handling
++
++| 鍦烘櫙 | 琛屼负 |
++|------|------|
++| NapCat 鏂繛 | 鑷姩閲嶈繛锛?s 闂撮殧锛夛紝鏈€澶?10 娆?|
++| 瑙ｇ爜澶辫触 | 寮曠敤鍥炲 `REPLY_DECODE_FAIL` |
++| HTTP 璇锋眰瓒呮椂 | 寮曠敤鍥炲 `REPLY_TIMEOUT` |
++| 鏃犵炕璇戠洰鏍?| 寮曠敤鍥炲 `REPLY_NOT_FOUND` |
++| 鏈煡閿欒 | console.error 鏃ュ織锛屼笉鍥炲锛堥伩鍏嶅埛灞忥級 |
++
++## Non-Goals
++
++- 涓嶅疄鐜扮鑱婄炕璇?+- 涓嶅疄鐜扮紪鐮佸姛鑳斤紙bot 涓嶈В鐮佲啋缂栫爜锛?+- 涓嶆敮鎸佸 Bot 瀹炰緥
++- 涓嶅仛娑堟伅鎸佷箙鍖?+
++---
++
++## Constraints
++
++- 涓嶆敼鍔?`src/nailong.ts`锛岀函 import 澶嶇敤
++- 涓嶄娇鐢ㄤ换浣?Bot Framework锛圞浣?Yunzai 绛夛級锛屾渶灏忎緷璧栧師鍒?+- 鍥炲鏂囨浠?`.env` 璇诲彇锛屾敮鎸佽嚜瀹氫箟
++- NapCat 閰嶇疆锛圵S/HTTP 鍦板潃锛変粠 `.env` 璇诲彇
+diff --git a/tsconfig.json b/tsconfig.json
+index 8485b37..105aa9b 100644
+--- a/tsconfig.json
++++ b/tsconfig.json
+@@ -8,12 +8,12 @@
+     "moduleResolution": "bundler",
+     "allowImportingTsExtensions": true,
+     "isolatedModules": true,
+     "moduleDetection": "force",
+     "noEmit": true,
+     "strict": true,
+     "noUnusedLocals": true,
+     "noUnusedParameters": true,
+     "noFallthroughCasesInSwitch": true
+   },
+-  "include": ["src"]
++  "include": ["src", "bot"]
+ }

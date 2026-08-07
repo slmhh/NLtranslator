@@ -1,0 +1,167 @@
+﻿ccf9500 feat: add message handler with translation logic
+---STAT---
+ bot/handler.ts | 156 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 156 insertions(+)
+---DIFF---
+diff --git a/bot/handler.ts b/bot/handler.ts
+new file mode 100644
+index 0000000..84ea9c3
+--- /dev/null
++++ b/bot/handler.ts
+@@ -0,0 +1,156 @@
++import { decodeFromNailong, HA } from "../src/nailong.ts";
++import type { Config } from "./config.ts";
++import type {
++  OneBotClient,
++  GroupMessageEvent,
++  MessageSegment,
++} from "./onebot.ts";
++
++const ZWC_RE = /[\u200B-\u200D\u2060]/;
++
++function isNailong(text: string): boolean {
++  return text.includes(HA) && ZWC_RE.test(text);
++}
++
++function extractNailong(rawMessage: string): string | null {
++  if (isNailong(rawMessage)) {
++    return rawMessage;
++  }
++  return null;
++}
++
++function findReplySegment(
++  message: MessageSegment[]
++): { id: string } | null {
++  for (const seg of message) {
++    if (seg.type === "reply") {
++      return seg.data as { id: string };
++    }
++  }
++  return null;
++}
++
++function isAtBot(
++  message: MessageSegment[],
++  botQQ: string
++): boolean {
++  for (const seg of message) {
++    if (seg.type === "at" && seg.data.qq === botQQ) {
++      return true;
++    }
++  }
++  return false;
++}
++
++export class MessageCache {
++  private groups = new Map<number, GroupMessageEvent[]>();
++  private maxSize = 10;
++
++  add(event: GroupMessageEvent): void {
++    const list = this.groups.get(event.group_id) ?? [];
++    list.push(event);
++    if (list.length > this.maxSize) {
++      list.shift();
++    }
++    this.groups.set(event.group_id, list);
++  }
++
++  getPrevious(groupId: number): GroupMessageEvent | undefined {
++    const list = this.groups.get(groupId);
++    if (!list || list.length < 2) return undefined;
++    return list[list.length - 2];
++  }
++}
++
++export function createHandler(
++  client: OneBotClient,
++  config: Config
++): (event: GroupMessageEvent) => Promise<void> {
++  const cache = new MessageCache();
++
++  return async (event: GroupMessageEvent) => {
++    cache.add(event);
++
++    if (!isAtBot(event.message, config.botQQ)) return;
++
++    const nailong = extractNailong(event.raw_message);
++    if (nailong) {
++      await replyWithTranslation(
++        client,
++        event.group_id,
++        event.message_id,
++        nailong,
++        config.replies.decodeFail
++      );
++      return;
++    }
++
++    const replySeg = findReplySegment(event.message);
++    if (replySeg) {
++      try {
++        const replied = await client.getMessage(Number(replySeg.id));
++        const rn = extractNailong(replied.raw_message);
++        if (rn) {
++          await replyWithTranslation(
++            client,
++            event.group_id,
++            Number(replySeg.id),
++            rn,
++            config.replies.decodeFail
++          );
++          return;
++        }
++      } catch {
++        await replyText(client, event, config.replies.timeout);
++        return;
++      }
++    }
++
++    const prev = cache.getPrevious(event.group_id);
++    if (prev) {
++      const pn = extractNailong(prev.raw_message);
++      if (pn) {
++        await replyWithTranslation(
++          client,
++          event.group_id,
++          prev.message_id,
++          pn,
++          config.replies.decodeFail
++        );
++        return;
++      }
++    }
++
++    await replyText(client, event, config.replies.notFound);
++  };
++}
++
++async function replyWithTranslation(
++  client: OneBotClient,
++  groupId: number,
++  replyToId: number,
++  nailongRaw: string,
++  decodeFailText: string
++): Promise<void> {
++  let result: string;
++  try {
++    result = decodeFromNailong(nailongRaw);
++  } catch {
++    result = decodeFailText;
++  }
++  await client.sendGroupMessage(groupId, [
++    { type: "reply", data: { id: String(replyToId) } },
++    { type: "text", data: { text: `缈昏瘧缁撴灉锛?{result}` } },
++  ]);
++}
++
++async function replyText(
++  client: OneBotClient,
++  event: GroupMessageEvent,
++  text: string
++): Promise<void> {
++  await client.sendGroupMessage(event.group_id, [
++    { type: "reply", data: { id: String(event.message_id) } },
++    { type: "text", data: { text } },
++  ]);
++}

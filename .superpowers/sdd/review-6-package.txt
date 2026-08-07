@@ -1,0 +1,23 @@
+﻿8f3d75b chore: add bot/ to tsconfig include
+---STAT---
+ tsconfig.json | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+---DIFF---
+diff --git a/tsconfig.json b/tsconfig.json
+index 8485b37..105aa9b 100644
+--- a/tsconfig.json
++++ b/tsconfig.json
+@@ -8,12 +8,12 @@
+     "moduleResolution": "bundler",
+     "allowImportingTsExtensions": true,
+     "isolatedModules": true,
+     "moduleDetection": "force",
+     "noEmit": true,
+     "strict": true,
+     "noUnusedLocals": true,
+     "noUnusedParameters": true,
+     "noFallthroughCasesInSwitch": true
+   },
+-  "include": ["src"]
++  "include": ["src", "bot"]
+ }

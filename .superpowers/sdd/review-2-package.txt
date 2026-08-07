@@ -1,0 +1,109 @@
+﻿757f9b6 feat: add config module and .env.example
+---STAT---
+ .env.example  | 13 ++++++++++
+ bot/config.ts | 78 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 91 insertions(+)
+---DIFF---
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..6186cff
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,13 @@
++# NapCat WebSocket 鍦板潃 (浜嬩欢鎺ユ敹)
++NAPCT_WS_URL=ws://127.0.0.1:3001
++
++# NapCat HTTP API 鍦板潃 (鍙戦€佹秷鎭?
++NAPCT_HTTP_URL=http://127.0.0.1:3000
++
++# Bot 鑷繁鐨?QQ 鍙?(鐢ㄤ簬鍒ゆ柇鏄惁琚獲)
++BOT_QQ=123456789
++
++# 鍥炲鏂囨
++REPLY_DECODE_FAIL=缈昏瘧澶辫触锛屽ザ榫欒鐨勮娉曟湁璇摝
++REPLY_NOT_FOUND=娌℃湁妫€娴嬪埌濂堕緳璇紝璇?@鎴?+ 濂堕緳璇?鎴栧紩鐢ㄤ竴鏉″ザ榫欒娑堟伅
++REPLY_TIMEOUT=Bot 鏆傛椂鏃犳硶鍝嶅簲锛岃绋嶅悗鍐嶈瘯
+diff --git a/bot/config.ts b/bot/config.ts
+new file mode 100644
+index 0000000..3866f77
+--- /dev/null
++++ b/bot/config.ts
+@@ -0,0 +1,78 @@
++import { readFileSync } from "node:fs";
++import { resolve } from "node:path";
++
++export interface ReplyMessages {
++  readonly decodeFail: string;
++  readonly notFound: string;
++  readonly timeout: string;
++}
++
++export interface Config {
++  readonly wsUrl: string;
++  readonly httpUrl: string;
++  readonly botQQ: string;
++  readonly replies: ReplyMessages;
++}
++
++function parseEnvFile(path: string): Record<string, string> {
++  const content = readFileSync(path, "utf-8");
++  const map: Record<string, string> = {};
++  for (const line of content.split("\n")) {
++    const trimmed = line.trim();
++    if (trimmed === "" || trimmed.startsWith("#")) continue;
++    const eq = trimmed.indexOf("=");
++    if (eq === -1) continue;
++    const key = trimmed.slice(0, eq).trim();
++    const value = trimmed.slice(eq + 1).trim();
++    map[key] = value;
++  }
++  return map;
++}
++
++export function loadConfig(): Config {
++  const envPath = resolve(process.cwd(), ".env");
++  let env: Record<string, string>;
++  try {
++    env = parseEnvFile(envPath);
++  } catch {
++    console.error("鎵句笉鍒?.env 鏂囦欢锛岃浠?.env.example 澶嶅埗骞跺～鍐欓厤缃?);
++    process.exit(1);
++  }
++
++  const wsUrl = env["NAPCT_WS_URL"] ?? process.env["NAPCT_WS_URL"];
++  const httpUrl = env["NAPCT_HTTP_URL"] ?? process.env["NAPCT_HTTP_URL"];
++  const botQQ = env["BOT_QQ"] ?? process.env["BOT_QQ"];
++
++  if (!wsUrl) {
++    console.error("缂哄皯 NAPCT_WS_URL 閰嶇疆");
++    process.exit(1);
++  }
++  if (!httpUrl) {
++    console.error("缂哄皯 NAPCT_HTTP_URL 閰嶇疆");
++    process.exit(1);
++  }
++  if (!botQQ) {
++    console.error("缂哄皯 BOT_QQ 閰嶇疆");
++    process.exit(1);
++  }
++
++  return {
++    wsUrl,
++    httpUrl,
++    botQQ,
++    replies: {
++      decodeFail:
++        env["REPLY_DECODE_FAIL"] ??
++        process.env["REPLY_DECODE_FAIL"] ??
++        "缈昏瘧澶辫触锛屽ザ榫欒鐨勮娉曟湁璇摝",
++      notFound:
++        env["REPLY_NOT_FOUND"] ??
++        process.env["REPLY_NOT_FOUND"] ??
++        "娌℃湁妫€娴嬪埌濂堕緳璇紝璇?@鎴?+ 濂堕緳璇?鎴栧紩鐢ㄤ竴鏉″ザ榫欒娑堟伅",
++      timeout:
++        env["REPLY_TIMEOUT"] ??
++        process.env["REPLY_TIMEOUT"] ??
++        "Bot 鏆傛椂鏃犳硶鍝嶅簲锛岃绋嶅悗鍐嶈瘯",
++    },
++  };
++}
