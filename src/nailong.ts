@@ -11,13 +11,29 @@ const TABLE: string[] = [
 
 const REVERSE = new Map<string, number>(TABLE.map((ch, i) => [ch, i]));
 
-export function encodeToNailong(text: string): string {
-  const units = [...text];
+export function encodeToNailong(text: string, haCount?: number): string {
   const zwc = bytesToZwc(new TextEncoder().encode(text));
-  const n = units.length;
-  if (n === 0) return "";
+  if (zwc.length === 0) return "";
+  if (haCount !== undefined) {
+    return spreadHa(zwc, haCount);
+  }
+  const n = [...text].length;
   if (n === 1) return HA + zwc + HA;
   return HA + zwc + HA.repeat(n - 1);
+}
+
+function spreadHa(zwc: string, haCount: number): string {
+  const parts = haCount - 1;
+  const base = Math.floor(zwc.length / parts);
+  const rem = zwc.length % parts;
+  let idx = 0;
+  let result = HA;
+  for (let i = 0; i < parts; i++) {
+    const len = base + (i < rem ? 1 : 0);
+    result += zwc.slice(idx, idx + len) + HA;
+    idx += len;
+  }
+  return result;
 }
 
 function bytesToZwc(bytes: Uint8Array): string {
