@@ -28,7 +28,10 @@ app.innerHTML = `
       </section>
 
       <section class="panel">
-        <label id="output-label" class="label" for="output">奶龙语言</label>
+        <div class="label-row">
+          <label id="output-label" class="label" for="output">奶龙语言</label>
+          <button id="btn-sound" class="sound-btn" type="button" title="播放读音">▶ 读音</button>
+        </div>
         <textarea id="output" class="textarea textarea-display" rows="6" spellcheck="false" readonly
           placeholder="翻译结果会显示在这里……"></textarea>
         <div class="actions actions-between">
@@ -70,6 +73,7 @@ const sourceLabel = document.querySelector<HTMLLabelElement>("#source-label")!;
 const outputLabel = document.querySelector<HTMLLabelElement>("#output-label")!;
 const swapBtn = document.querySelector<HTMLButtonElement>("#btn-swap")!;
 const translateBtn = document.querySelector<HTMLButtonElement>("#btn-translate")!;
+const soundBtn = document.querySelector<HTMLButtonElement>("#btn-sound")!;
 const toast = document.querySelector<HTMLDivElement>("#toast")!;
 const haInput = document.querySelector<HTMLInputElement>("#ha-count")!;
 const encodeTip = document.querySelector<HTMLParagraphElement>("#encode-tip")!;
@@ -157,6 +161,70 @@ function parseHaCount(): number | null | undefined {
   }
   return count;
 }
+
+const soundUrls = import.meta.glob("./assets/sounds/*.mp3", {
+  eager: true,
+  query: "?url",
+  import: "default",
+}) as Record<string, string>;
+
+function hashString(text: string): number {
+  let hash = 5381;
+  for (let i = 0; i < text.length; i++) {
+    hash = (((hash << 5) + hash + text.charCodeAt(i)) >>> 0);
+  }
+  return hash;
+}
+
+let currentAudio: HTMLAudioElement | null = null;
+
+function playSoundAt(urls: string[], start: number, tried: number) {
+  if (tried >= urls.length) {
+    showToast("读音播放失败");
+    return;
+  }
+  const index = (start + tried) % urls.length;
+  currentAudio?.pause();
+  const audio = new Audio(urls[index]);
+  currentAudio = audio;
+  let settled = false;
+  const markPlaying = () => {
+    soundBtn.classList.add("playing");
+    soundBtn.textContent = "♪ 播放中";
+  };
+  const clearPlaying = () => {
+    soundBtn.classList.remove("playing");
+    soundBtn.textContent = "▶ 读音";
+  };
+  const fail = () => {
+    if (settled) return;
+    settled = true;
+    clearPlaying();
+    playSoundAt(urls, start, tried + 1);
+  };
+  audio.onerror = fail;
+  audio.play()
+    .then(() => {
+      if (settled) return;
+      markPlaying();
+      audio.onended = clearPlaying;
+    })
+    .catch(fail);
+}
+
+soundBtn.addEventListener("click", () => {
+  if (!output.value) {
+    showToast("翻译结果为空，先翻译点什么吧");
+    return;
+  }
+  const urls = Object.values(soundUrls);
+  if (urls.length === 0) {
+    showToast("没有可播放的声音");
+    return;
+  }
+  const base = source.value || output.value;
+  playSoundAt(urls, hashString(base) % urls.length, 0);
+});
 
 swapBtn.addEventListener("click", () => {
   const sourceText = source.value;

@@ -115,6 +115,36 @@ body {
   flex: none;
 }
 
+.sound-btn {
+  border: 2px solid #f6ecd4;
+  background: #fffef9;
+  color: var(--accent-dark);
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+  font-family: inherit;
+  flex: none;
+}
+
+.sound-btn:hover {
+  border-color: var(--accent);
+  background: #fdf6df;
+}
+
+.sound-btn.playing {
+  border-color: var(--accent);
+  background: #fdf0c7;
+  animation: sound-pulse 0.9s ease-in-out infinite;
+}
+
+@keyframes sound-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 170, 0, 0.25); }
+  50% { box-shadow: 0 0 0 8px rgba(255, 170, 0, 0); }
+}
+
 .ha-input {
   width: 84px;
   padding: 4px 10px;
@@ -146,6 +176,13 @@ body {
   font-size: 17px;
   font-weight: 600;
   color: var(--accent-dark);
+}
+
+.label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 32px;
 }
 
 .textarea {
